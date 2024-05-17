@@ -4,7 +4,6 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 )
@@ -52,19 +51,16 @@ func FetchBalance(svc *dynamodb.DynamoDB, userID string) (*Balance, error) {
 	return balance, nil
 }
 
-// UpdateBalance updates a user's balance in the DynamoDB table with concurrency safety and negative amount checks
-func UpdateBalance(svc *dynamodb.DynamoDB, userID string, availableChange, totalChange float64) error {
+// UpdateBalance updates a user's balance in the DynamoDB table
+func UpdateBalance(svc *dynamodb.DynamoDB, userID string, amount float64) error {
 	for {
 		balance, err := FetchBalance(svc, userID)
 		if err != nil {
 			return err
 		}
 
-		newAvailable := balance.Available + availableChange
-		newTotal := balance.Total + totalChange
-		if newAvailable < 0 || newTotal < 0 {
-			return fmt.Errorf("update would result in negative balance")
-		}
+		newAvailable := balance.Available + amount
+		newTotal := balance.Total + amount
 
 		input := &dynamodb.UpdateItemInput{
 			TableName: aws.String("Balances"),
@@ -73,8 +69,7 @@ func UpdateBalance(svc *dynamodb.DynamoDB, userID string, availableChange, total
 					S: aws.String(userID),
 				},
 			},
-			UpdateExpression:    aws.String("set available = :newAvailable, total = :newTotal"),
-			ConditionExpression: aws.String("available = :currentAvailable AND total = :currentTotal"),
+			UpdateExpression: aws.String("set available = :newAvailable, total = :newTotal"),
 			ExpressionAttributeValues: map[string]*dynamodb.AttributeValue{
 				":newAvailable": {
 					N: aws.String(fmt.Sprintf("%f", newAvailable)),
@@ -82,33 +77,16 @@ func UpdateBalance(svc *dynamodb.DynamoDB, userID string, availableChange, total
 				":newTotal": {
 					N: aws.String(fmt.Sprintf("%f", newTotal)),
 				},
-				":currentAvailable": {
-					N: aws.String(fmt.Sprintf("%f", balance.Available)),
-				},
-				":currentTotal": {
-					N: aws.String(fmt.Sprintf("%f", balance.Total)),
-				},
 			},
 		}
 
 		_, err = svc.UpdateItem(input)
 		if err != nil {
-			if isConditionalCheckFailed(err) {
-				continue
-			}
 			return fmt.Errorf("failed to update item in DynamoDB: %v", err)
 		}
 
 		return nil
 	}
-}
-
-// isConditionalCheckFailed checks if the error is a ConditionalCheckFailedException
-func isConditionalCheckFailed(err error) bool {
-	if aerr, ok := err.(awserr.Error); ok && aerr.Code() == dynamodb.ErrCodeConditionalCheckFailedException {
-		return true
-	}
-	return false
 }
 
 // CreateSellOrder creates a new sell order and updates the user's balance
@@ -139,7 +117,7 @@ func CreateSellOrder(svc *dynamodb.DynamoDB, userID string, orderID string, amou
 		return fmt.Errorf("failed to put order in DynamoDB: %v", err)
 	}
 
-	err = UpdateBalance(svc, userID, -amount, -amount)
+	err = UpdateBalance(svc, userID, -amount)
 	if err != nil {
 		return fmt.Errorf("failed to update balance: %v", err)
 	}
@@ -148,7 +126,7 @@ func CreateSellOrder(svc *dynamodb.DynamoDB, userID string, orderID string, amou
 }
 
 // Settle settles an order and updates the user's balance
-func Settle(svc *dynamodb.DynamoDB, orderID string) error {
+func Settle(svc *dynamodb.DynamoDB, userID string, orderID string) error {
 	// Fetch the order
 	getOrderInput := &dynamodb.GetItemInput{
 		TableName: aws.String("Orders"),
@@ -196,6 +174,11 @@ func Settle(svc *dynamodb.DynamoDB, orderID string) error {
 	_, err = svc.UpdateItem(updateOrderInput)
 	if err != nil {
 		return fmt.Errorf("failed to update order status in DynamoDB: %v", err)
+	}
+
+	err = UpdateBalance(svc, userID, -order.Amount)
+	if err != nil {
+		return fmt.Errorf("failed to update balance: %v", err)
 	}
 
 	return nil
