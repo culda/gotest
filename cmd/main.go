@@ -8,7 +8,9 @@ import (
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 )
 
-// Balance represents a user's balance with available amount
+// Balance represents a user's balance
+// Available is the amount that can be used in orders
+// Total is the total amount of money
 type Balance struct {
 	UserID    string  `json:"user_id"`
 	Available float64 `json:"available"`
